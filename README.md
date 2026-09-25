@@ -53,7 +53,14 @@ data/                      what the viewer reads
 raw/<n>_<name>_<id>.json.gz   the preservation copy: every MongoDB document
                               for that experiment, losslessly gzipped
 
+reference/                 data not reachable from an experiment
+  problems.json            the 9 saved problem definitions
+  sources.json             the 2 firmware repository records
+  sources/<repo>/*         the Contiki-NG code every simulation was built from
+  problems/*-background.*  problem background images
+
 tools/build_archive.py     rebuilds data/ and raw/ from a database export
+tools/export_reference.py  captures reference/ straight from MongoDB
 tools/compute_metrics.py   computes the quality indicators into data/
 tools/moo_metrics.py       hypervolume, GD, IGD — standard library only
 ```
@@ -120,7 +127,10 @@ and are not recoverable from these files:
 - `simulation.xml`, `positions.dat` — the exact Cooja inputs per simulation
 - firmware snapshots, topology images, pre-rendered analysis charts
 
-What survives of them is the **summary** `network_metrics` on each simulation
+The firmware sources under `reference/sources/` are the exception: they are
+small, they define what the simulated nodes actually ran, and they are kept.
+
+What survives of the rest is the **summary** `network_metrics` on each simulation
 (energy, latency, throughput, hop count, packet counters) and the DODAG tree,
 both of which are inside the `raw/` records. The per-node time series and the
 raw logs are not.
