@@ -5,7 +5,9 @@ An archive of multi-objective optimisation experiments run with
 evaluating wireless sensor network topologies against Cooja/Contiki-NG
 simulations.
 
-51 experiments are preserved here, with an interactive viewer:
+51 experiments are preserved here, with an interactive viewer — Pareto fronts,
+parallel-coordinate trade-off plots, per-generation convergence, relay
+topologies, and hypervolume/GD/IGD rankings across comparable runs:
 
 **https://juniocesarferreira.github.io/simlab-results/**
 
@@ -39,21 +41,74 @@ simulated network rather than from an analytical model.
 
 ```
 data/                      what the viewer reads
-  index.json               one summary row per experiment
+  index.json               one summary row per experiment, with its final
+                           HV / GD / IGD
+  groups.json              the comparable groups: reference front, ideal and
+                           nadir, and every run's indicators
   exp/<id>/core.json       generations, objectives, Pareto front,
                            per-simulation network metrics
   exp/<id>/chromosomes.json  relay coordinates, for the topology view
+  exp/<id>/metrics.json    hypervolume, GD and IGD per generation
 
 raw/<n>_<name>_<id>.json.gz   the preservation copy: every MongoDB document
                               for that experiment, losslessly gzipped
 
 tools/build_archive.py     rebuilds data/ and raw/ from a database export
+tools/compute_metrics.py   computes the quality indicators into data/
+tools/moo_metrics.py       hypervolume, GD, IGD — standard library only
 ```
 
 `data/` is derived from `raw/` and rounded to the precision the charts use
 (2 decimals for coordinates, 6 for objectives). `raw/` is the authority: it is
 the export exactly as it left the database, and the build verifies every
 gzip round-trip against a SHA-256 of the source before writing it.
+
+## Quality indicators
+
+Every run is scored with the three usual multi-objective indicators, and the
+viewer plots them per generation and ranks the runs against each other:
+
+| | |
+|---|---|
+| **HV** — hypervolume | volume of objective space dominated by the front. **Higher is better**: it rewards converging *and* spreading out. |
+| **GD** — generational distance | mean distance from each point of the front to the nearest reference point. **Lower is better**: pure convergence, blind to coverage. |
+| **IGD** — inverted generational distance | mean distance from each *reference* point to the nearest point of the front. **Lower is better**: convergence and coverage together. |
+
+They are computed once by `tools/compute_metrics.py` and stored, not computed
+in the browser: IGD is `O(|reference| × |front|)` per generation, over 1 153
+generations.
+
+**Runs are only compared within a group** — same problem, same objectives, same
+directions. The archive has five: `problem0` with 2 objectives (SCH1),
+`problem0` with 3 (DTLZ2), and `problem1`, `problem2`, `problem3` with
+latency/energy/throughput. Indicators from different groups are different
+numbers with the same name; the viewer never mixes them.
+
+**The reference front is empirical.** These objectives come out of a Cooja
+simulation, so no analytical Pareto front exists to measure against. Each
+group's reference front is the non-dominated set of every feasible point every
+run in that group evaluated, thinned to 500 points by farthest-point sampling
+so the extremes and the spread survive. This is the usual substitute and it
+carries the usual caveat: *it flatters a group whose runs all converge to the
+same wrong place*, because then that place is the reference. These are
+comparisons between the runs, not distances to the truth.
+
+**Scaling.** Objectives being maximised are negated, then each objective is
+scaled to `[0, 1]` over the reference front's range — its ideal and its nadir.
+Latency in milliseconds and energy in millijoules are otherwise incommensurable
+and the hypervolume would just measure whichever has the larger unit. The
+hypervolume reference point is `1.1` in every scaled objective, so a solution
+at the nadir of one objective still earns volume for being extreme in another.
+
+**Infeasible individuals are dropped.** They are scored with a ~1.01e9 penalty
+in every objective (negated where maximised), which is not a point in objective
+space; `metrics.json` reports how many were dropped per generation.
+
+Per generation, the indicators are measured on the non-dominated set of *that
+generation's own population* — not on the best found so far — so the curves can
+dip when a generation explores. The per-run figure is measured on the recorded
+Pareto front, or on the last generation for the three cancelled runs that never
+recorded one.
 
 ### What is *not* in the archive
 
@@ -102,8 +157,11 @@ reason.
 # in the simlab repository: dump MongoDB to one JSON file per experiment
 python util/export_experiments.py --output experiments_export
 
-# here: build raw/ and data/ from that dump
+# here: build raw/ and data/ from that dump, indicators included
 python tools/build_archive.py --input ../simlab/experiments_export
+
+# or recompute only the indicators, over the data/ already in the repository
+python tools/compute_metrics.py
 ```
 
 ## Citation

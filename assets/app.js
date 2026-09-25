@@ -34,6 +34,13 @@
     return n.toLocaleString(undefined, { maximumFractionDigits: digits });
   }
 
+  /** Indicators are small and unitless; 3 significant-ish decimals read best. */
+  function fmtInd(v) {
+    if (v === null || v === undefined || !Number.isFinite(Number(v))) return "—";
+    const n = Number(v);
+    return Math.abs(n) >= 1 || n === 0 ? n.toFixed(3) : n.toFixed(Math.abs(n) < 0.001 ? 5 : 4);
+  }
+
   function fmtDate(s) {
     if (!s) return "—";
     const d = new Date(s);
@@ -131,7 +138,10 @@
 
   async function renderList() {
     crumbs.innerHTML = "";
-    const index = await getJSON("data/index.json");
+    const [index, groups] = await Promise.all([
+      getJSON("data/index.json"),
+      getJSON("data/groups.json").catch(() => null),
+    ]);
     const rows = index.experiments;
 
     const strategies = [...new Set(rows.map((r) => r.strategy).filter(Boolean))].sort();
@@ -143,6 +153,12 @@
       <p class="sub">${rows.length} multi-objective optimisation runs, exported from the
       SimLab database. Every run keeps its full record — click through for charts,
       or download the lossless JSON.</p>
+
+      ${groups ? `<div class="chips">
+        <span class="chips-label">Compare runs:</span>
+        ${groups.groups.map((g) => `<a class="chip" href="#/group/${encodeURIComponent(g.key)}">
+          ${esc(g.problem)} · ${g.objectives.length} obj · ${g.runs.length} runs</a>`).join("")}
+      </div>` : ""}
 
       <div class="filters">
         <input id="q" type="search" placeholder="Filter by name…" aria-label="Filter by name">
@@ -162,6 +178,9 @@
           <th class="sortable num" data-k="generations">Gens</th>
           <th class="sortable num" data-k="individuals">Individuals</th>
           <th class="sortable num" data-k="simulations">Simulations</th>
+          <th class="sortable num" data-k="hv" title="Hypervolume of the final front (higher is better)">HV</th>
+          <th class="sortable num" data-k="gd" title="Generational distance (lower is better)">GD</th>
+          <th class="sortable num" data-k="igd" title="Inverted generational distance (lower is better)">IGD</th>
           <th class="sortable" data-k="start_time">Started</th>
           <th class="sortable" data-k="status">Status</th>
         </tr></thead>
@@ -172,8 +191,11 @@
 
     let sortKey = "start_time", sortDir = -1;
 
-    const keyOf = (r, k) =>
-      ["generations", "individuals", "simulations"].includes(k) ? r.counts[k] : r[k];
+    const keyOf = (r, k) => {
+      if (["generations", "individuals", "simulations"].includes(k)) return r.counts[k];
+      if (["hv", "gd", "igd"].includes(k)) return r.metrics ? r.metrics[k] : null;
+      return r[k];
+    };
 
     function draw() {
       const q = document.getElementById("q").value.trim().toLowerCase();
@@ -203,10 +225,13 @@
           <td class="num">${r.counts.generations}</td>
           <td class="num">${r.counts.individuals.toLocaleString()}</td>
           <td class="num">${r.counts.simulations.toLocaleString()}</td>
+          <td class="num">${fmtInd(r.metrics?.hv)}</td>
+          <td class="num">${fmtInd(r.metrics?.gd)}</td>
+          <td class="num">${fmtInd(r.metrics?.igd)}</td>
           <td>${esc(fmtDate(r.start_time))}</td>
           <td>${statusPill(r.status)}</td>
         </tr>`).join("") ||
-        `<tr><td colspan="8" class="empty">No experiment matches these filters.</td></tr>`;
+        `<tr><td colspan="11" class="empty">No experiment matches these filters.</td></tr>`;
 
       document.getElementById("count").textContent =
         `${shown.length} of ${rows.length} experiments`;
@@ -238,7 +263,13 @@
     }
     crumbs.innerHTML = `<a href="#/">Experiments</a> / ${esc(summary.name || id)}`;
 
-    const core = await getJSON(`data/exp/${encodeURIComponent(id)}/core.json`);
+    const [core, metrics, groups] = await Promise.all([
+      getJSON(`data/exp/${encodeURIComponent(id)}/core.json`),
+      getJSON(`data/exp/${encodeURIComponent(id)}/metrics.json`).catch(() => null),
+      getJSON("data/groups.json").catch(() => null),
+    ]);
+    const group = groups && metrics
+      ? groups.groups.find((g) => g.key === metrics.group) : null;
     const exp = core.experiment;
     const objs = objectiveNames(exp);
     const algo = exp?.parameters?.algorithm || {};
@@ -280,8 +311,14 @@
         </dl></div>
       </div>
 
+      <h2>Quality indicators</h2>
+      <div id="ind-wrap"></div>
+
       <h2>Pareto front</h2>
       <div id="pareto-wrap"></div>
+
+      <h2>Objective trade-offs</h2>
+      <div id="par-wrap"></div>
 
       <h2>Objectives across generations</h2>
       <div id="evo-wrap"></div>
@@ -311,7 +348,9 @@
         viewer does not chart.</p>
     `);
 
+    drawIndicators(id, metrics, group);
     drawPareto(core, objs);
+    drawParallel(core, objs, group);
     drawEvolution(core, objs);
     await drawTopology(id, core, problem);
     footMeta.textContent = `${esc(summary.name || id)} · id ${id}`;
@@ -573,14 +612,404 @@
     update();
   }
 
+  // ---------------------------------------------------- quality indicators
+
+  const IND = {
+    hv: { label: "Hypervolume", better: "higher", colour: PALETTE[2] },
+    gd: { label: "Generational distance", better: "lower", colour: PALETTE[0] },
+    igd: { label: "Inverted generational distance", better: "lower", colour: PALETTE[1] },
+  };
+
+  /** Where this run places among the comparable runs, 1 = best. */
+  function rankIn(group, id, key) {
+    if (!group) return null;
+    const scored = group.runs.filter((r) => Number.isFinite(r[key]));
+    if (!scored.length) return null;
+    scored.sort((a, b) => (IND[key].better === "higher" ? b[key] - a[key] : a[key] - b[key]));
+    const at = scored.findIndex((r) => r.id === id);
+    return at < 0 ? null : { rank: at + 1, of: scored.length };
+  }
+
+  function drawIndicators(id, metrics, group) {
+    const wrap = document.getElementById("ind-wrap");
+    if (!metrics) {
+      wrap.innerHTML = `<p class="empty">Indicators have not been computed for this run.
+        Run <code>tools/compute_metrics.py</code> over the archive.</p>`;
+      return;
+    }
+
+    const f = metrics.final;
+    const card = (key) => {
+      const r = Number.isFinite(f[key]) ? rankIn(group, id, key) : null;
+      const caption = r ? `#${r.rank} of ${r.of} comparable runs`
+        : Number.isFinite(f[key]) ? "nothing to compare with"
+        : "this run left no front to score";
+      return `<div class="card">
+        <div class="k">${esc(key.toUpperCase())} · ${IND[key].better} is better</div>
+        <div class="v">${fmtInd(f[key])}</div>
+        <div class="k">${caption}</div>
+      </div>`;
+    };
+
+    wrap.innerHTML = `
+      <div class="grid">
+        ${card("hv")}${card("gd")}${card("igd")}
+        <div class="card">
+          <div class="k">Measured on</div>
+          <div class="v small">${f.front_size} points</div>
+          <div class="k">${f.source === "pareto_front"
+            ? "the recorded Pareto front" : "the last generation (no front recorded)"}</div>
+        </div>
+      </div>
+      <p class="note">Objectives are scaled to the reference front's own range before
+        measuring, so the three numbers are comparable between runs of
+        ${group ? `<a href="#/group/${encodeURIComponent(metrics.group)}">${esc(group.problem)}
+        with the same objectives</a>` : "the same problem"} — and meaningless outside it.
+        Hypervolume uses the reference point ${metrics.hv_reference_point} in every scaled
+        objective; the distances are measured against a reference front of
+        ${metrics.reference_front_size} points.</p>
+      <div id="ind-conv"></div>
+      <div id="ind-cmp"></div>`;
+
+    drawConvergence(metrics);
+    drawGroupBars(group, id);
+  }
+
+  /** The three indicators over the generations of one run. */
+  function drawConvergence(metrics) {
+    const wrap = document.getElementById("ind-conv");
+    const gens = metrics.generations.filter((g) => g.hv !== null);
+    if (gens.length < 2) {
+      wrap.innerHTML = `<p class="note">Too few generations to chart a convergence curve.</p>`;
+      return;
+    }
+    wrap.innerHTML = `<div id="conv" class="chart" style="height:300px"></div>
+      <p class="note">Measured on the non-dominated set of each generation's own
+        population, not on the best found so far — so these curves can dip when a
+        generation explores.</p>`;
+
+    // Hypervolume runs to ~1 and the distances to ~0.1; on one axis the distances
+    // would be a flat line along the floor.
+    makeChart(document.getElementById("conv"), {
+      tooltip: { trigger: "axis", valueFormatter: (v) => fmtInd(v) },
+      legend: { top: 0, textStyle: { color: css("--muted") } },
+      grid: { left: 58, right: 58, top: 34, bottom: 46, containLabel: true },
+      xAxis: {
+        type: "category", data: gens.map((g) => g.index),
+        name: "generation", nameLocation: "middle", nameGap: 26,
+      },
+      yAxis: [
+        { type: "value", scale: true, name: "HV", nameTextStyle: { color: css("--muted") } },
+        { type: "value", scale: true, name: "distance", position: "right",
+          nameTextStyle: { color: css("--muted") }, splitLine: { show: false } },
+      ],
+      series: [
+        { name: "HV", type: "line", yAxisIndex: 0, showSymbol: false,
+          data: gens.map((g) => g.hv),
+          lineStyle: { width: 2.2, color: IND.hv.colour }, itemStyle: { color: IND.hv.colour } },
+        { name: "GD", type: "line", yAxisIndex: 1, showSymbol: false,
+          data: gens.map((g) => g.gd),
+          lineStyle: { width: 1.6, color: IND.gd.colour }, itemStyle: { color: IND.gd.colour } },
+        { name: "IGD", type: "line", yAxisIndex: 1, showSymbol: false,
+          data: gens.map((g) => g.igd),
+          lineStyle: { width: 1.6, color: IND.igd.colour }, itemStyle: { color: IND.igd.colour } },
+      ],
+    });
+  }
+
+  /** This run against every comparable run, one indicator at a time. */
+  function drawGroupBars(group, id) {
+    const wrap = document.getElementById("ind-cmp");
+    if (!group || group.runs.length < 2) {
+      wrap.innerHTML = "";
+      return;
+    }
+    wrap.innerHTML = `
+      <div class="chartbar">
+        <label for="ci">Compare by</label>
+        <select id="ci">${Object.keys(IND).map((k) =>
+          `<option value="${k}">${esc(IND[k].label)}</option>`).join("")}</select>
+        <span class="note" style="margin:0">across ${group.runs.length} runs of
+          ${esc(group.problem)} with the same objectives</span>
+      </div>
+      <div id="cmp" class="chart" style="height:${Math.max(180, 22 * group.runs.length + 60)}px"></div>`;
+
+    const chart = makeChart(document.getElementById("cmp"), { xAxis: {}, yAxis: {} });
+    const select = document.getElementById("ci");
+
+    function update() {
+      const key = select.value;
+      const runs = group.runs
+        .filter((r) => Number.isFinite(r[key]))
+        .sort((a, b) => (IND[key].better === "higher" ? a[key] - b[key] : b[key] - a[key]));
+      chart.setOption({
+        tooltip: {
+          trigger: "item",
+          formatter: (p) => `${esc(runs[p.dataIndex].name)}<br>${esc(key.toUpperCase())}:
+            <b>${fmtInd(p.value)}</b><br>${esc(runs[p.dataIndex].strategy || "")}`,
+        },
+        grid: { left: 8, right: 60, top: 10, bottom: 34, containLabel: true },
+        xAxis: { type: "value", axisLabel: { formatter: (v) => fmtInd(v), color: css("--muted") } },
+        yAxis: {
+          type: "category", data: runs.map((r) => r.name || r.id),
+          axisLabel: {
+            color: css("--muted"), width: 190, overflow: "truncate",
+            formatter: (v) => v,
+          },
+        },
+        series: [{
+          type: "bar", data: runs.map((r) => r[key]), barMaxWidth: 14,
+          itemStyle: {
+            color: (p) => (runs[p.dataIndex].id === id ? IND[key].colour : css("--border")),
+          },
+          label: {
+            show: true, position: "right", color: css("--muted"), fontSize: 11,
+            formatter: (p) => fmtInd(p.value),
+          },
+        }],
+      }, { replaceMerge: ["series", "xAxis", "yAxis"] });
+    }
+
+    select.addEventListener("change", update);
+    update();
+  }
+
+  // ------------------------------------------------- parallel coordinates
+
+  /** Every objective on its own vertical axis, one line per solution.
+      Lines that cross between two axes are the trade-off between them. */
+  function drawParallel(core, objs, group) {
+    const wrap = document.getElementById("par-wrap");
+    if (objs.length < 2) {
+      wrap.innerHTML = `<p class="empty">A parallel plot needs at least two objectives.</p>`;
+      return;
+    }
+
+    const feasible = (values) =>
+      values.length === objs.length &&
+      values.every((v) => Number.isFinite(v) && Math.abs(v) < 1e8);
+
+    const fromPareto = core.pareto
+      .map((p) => objs.map((o, i) => objValue(p.obj, i, o.name)))
+      .filter(feasible);
+
+    const lastGen = core.generations.slice().sort((a, b) => b.index - a.index)[0];
+    const fromLast = core.individuals
+      .filter((ind) => ind.gen === lastGen?.id)
+      .map((ind) => objs.map((o, i) => objValue(ind.obj, i, o.name)))
+      .filter(feasible);
+
+    const fromAll = core.individuals
+      .map((ind) => objs.map((o, i) => objValue(ind.obj, i, o.name)))
+      .filter(feasible);
+
+    const sources = [
+      ["pareto", `Pareto front (${fromPareto.length})`, fromPareto],
+      ["last", `Last generation (${fromLast.length})`, fromLast],
+      ["all", `All feasible individuals (${fromAll.length})`, fromAll],
+    ].filter(([, , rows]) => rows.length);
+
+    if (!sources.length) {
+      wrap.innerHTML = `<p class="empty">No feasible solution to plot.</p>`;
+      return;
+    }
+
+    wrap.innerHTML = `
+      <div class="chartbar">
+        <label for="ps">Show</label>
+        <select id="ps">${sources.map(([k, label]) =>
+          `<option value="${k}">${esc(label)}</option>`).join("")}</select>
+        <label for="pcol">Colour by</label>
+        <select id="pcol">${objs.map((o, i) =>
+          `<option value="${i}">${esc(o.name)}</option>`).join("")}</select>
+      </div>
+      <div id="par" class="chart" style="height:340px"></div>
+      <p class="note">Every axis points the same way: <strong>best at the top</strong>
+        (lowest for an objective being minimised, highest for one being maximised), so a
+        line that stays high is good everywhere and crossing lines are a trade-off.
+        ${group ? `Axes span the range of the reference front for
+        ${esc(group.problem)}, so the picture is comparable between runs.` : ""}
+        Lines are capped at 2 000 — beyond that the plot is ink, not information.</p>`;
+
+    const chart = makeChart(document.getElementById("par"), {});
+    const pick = document.getElementById("ps");
+    const colour = document.getElementById("pcol");
+
+    const LIMIT = 2000;
+    function thin(rows) {
+      if (rows.length <= LIMIT) return rows;
+      const step = rows.length / LIMIT;
+      return Array.from({ length: LIMIT }, (_, i) => rows[Math.floor(i * step)]);
+    }
+
+    function update() {
+      const rows = thin((sources.find(([k]) => k === pick.value) || sources[0])[2]);
+      const dim = +colour.value;
+      const column = rows.map((r) => r[dim]).filter(Number.isFinite);
+
+      const axes = objs.map((o, i) => {
+        const bounds = group?.objectives?.[i];
+        const values = rows.map((r) => r[i]).filter(Number.isFinite);
+        let lo = bounds ? Math.min(bounds.best, bounds.worst) : Math.min(...values);
+        let hi = bounds ? Math.max(bounds.best, bounds.worst) : Math.max(...values);
+        // An objective every solution agrees on collapses the axis to a point.
+        if (!(hi > lo)) { lo -= 0.5; hi += 0.5; }
+        return {
+          dim: i, name: `${o.name} (${o.goal})`,
+          min: lo, max: hi,
+          // Best at the top: a minimised axis therefore counts downwards.
+          inverse: o.goal !== "max",
+          nameTextStyle: { color: css("--muted") },
+          axisLabel: { formatter: compactNum, color: css("--muted") },
+          axisLine: { lineStyle: { color: css("--border") } },
+          axisTick: { lineStyle: { color: css("--border") } },
+        };
+      });
+
+      chart.setOption({
+        tooltip: {
+          trigger: "item",
+          formatter: (p) => objs
+            .map((o, i) => `${esc(o.name)}: <b>${fmtNum(p.value[i])}</b>`).join("<br>"),
+        },
+        visualMap: column.length ? {
+          min: Math.min(...column), max: Math.max(...column), dimension: dim,
+          calculable: true, orient: "horizontal", left: "center", bottom: 0,
+          text: [objs[dim].name, ""], textStyle: { color: css("--muted") },
+          inRange: { color: ["#3f7fb0", "#7fae7a", "#c9772f"] },
+        } : { show: false },
+        parallel: { left: 46, right: 46, top: 26, bottom: 74 },
+        parallelAxis: axes,
+        series: [{
+          type: "parallel", data: rows, smooth: false,
+          lineStyle: { width: 1, opacity: rows.length > 400 ? 0.16 : 0.45 },
+          progressive: 600,
+        }],
+      }, { replaceMerge: ["series", "parallelAxis", "visualMap"] });
+    }
+
+    [pick, colour].forEach((el) => el.addEventListener("change", update));
+    update();
+  }
+
+  // ------------------------------------------------------------ group view
+
+  async function renderGroup(key) {
+    const groups = await getJSON("data/groups.json");
+    const group = groups.groups.find((g) => g.key === key);
+    if (!group) {
+      render(`<div class="error">No comparison group <code>${esc(key)}</code> in this archive.</div>`);
+      return;
+    }
+    crumbs.innerHTML = `<a href="#/">Experiments</a> / ${esc(group.problem)} comparison`;
+
+    const scored = group.runs.filter((r) => Number.isFinite(r.hv));
+
+    render(`
+      <h1>${esc(group.problem)} · ${group.objectives.map((o) => esc(o.name)).join(", ")}</h1>
+      <p class="sub">${group.runs.length} runs measured against one another.
+        ${scored.length} produced a front that could be scored.</p>
+
+      <div class="grid">
+        <div class="panel"><dl class="kv">
+          <dt>Reference front</dt><dd>${group.reference_front_size.toLocaleString()} points
+            ${group.reference_front_total > group.reference_front_size
+              ? `(thinned from ${group.reference_front_total.toLocaleString()})` : ""}</dd>
+          <dt>HV reference</dt><dd>${group.hv_reference_point} in every scaled objective</dd>
+          ${group.objectives.map((o) => `<dt>${esc(o.name)} (${esc(o.goal)})</dt>
+            <dd>best ${compactNum(o.best)} · worst ${compactNum(o.worst)}</dd>`).join("")}
+        </dl></div>
+        <div class="panel">
+          <p class="note" style="margin:0">These problems have no analytical Pareto front —
+            the objectives come out of a Cooja simulation — so the reference front is the
+            non-dominated set of every feasible point these ${group.runs.length} runs
+            evaluated, and each objective is scaled to its range. That makes the runs
+            comparable with each other; it does not make them comparable with the truth.
+            A group whose runs all converge to the same wrong place will score well.</p>
+        </div>
+      </div>
+
+      <h2>Ranking</h2>
+      <div class="chartbar">
+        <label for="gi">Indicator</label>
+        <select id="gi">${Object.keys(IND).map((k) =>
+          `<option value="${k}">${esc(IND[k].label)}</option>`).join("")}</select>
+      </div>
+      <div id="grank" class="chart" style="height:${Math.max(200, 22 * scored.length + 60)}px"></div>
+
+      <h2>Convergence against coverage</h2>
+      <div id="gscatter" class="chart" style="height:340px"></div>
+      <p class="note">Each point is a run: hypervolume against inverted generational
+        distance. The two disagree when a run finds an excellent piece of the front and
+        misses the rest.</p>
+
+      <h2>Runs</h2>
+      <div class="tablewrap"><table>
+        <thead><tr><th>Run</th><th>Strategy</th><th>Status</th>
+          <th class="num">Gens</th><th class="num">Front</th>
+          <th class="num">HV</th><th class="num">GD</th><th class="num">IGD</th></tr></thead>
+        <tbody>${group.runs.map((r) => `<tr>
+          <td><a class="rowlink" href="#/exp/${encodeURIComponent(r.id)}">${esc(r.name || r.id)}</a></td>
+          <td>${esc(r.strategy || "—")}</td><td>${statusPill(r.status)}</td>
+          <td class="num">${r.generations}</td><td class="num">${r.front_size}</td>
+          <td class="num">${fmtInd(r.hv)}</td><td class="num">${fmtInd(r.gd)}</td>
+          <td class="num">${fmtInd(r.igd)}</td></tr>`).join("")}</tbody>
+      </table></div>
+    `);
+
+    const rank = makeChart(document.getElementById("grank"), { xAxis: {}, yAxis: {} });
+    const select = document.getElementById("gi");
+
+    function updateRank() {
+      const k = select.value;
+      const runs = scored.slice()
+        .sort((a, b) => (IND[k].better === "higher" ? a[k] - b[k] : b[k] - a[k]));
+      rank.setOption({
+        tooltip: { trigger: "item", formatter: (p) =>
+          `${esc(runs[p.dataIndex].name)}<br>${esc(k.toUpperCase())}: <b>${fmtInd(p.value)}</b>` },
+        grid: { left: 8, right: 60, top: 10, bottom: 34, containLabel: true },
+        xAxis: { type: "value", axisLabel: { formatter: (v) => fmtInd(v), color: css("--muted") } },
+        yAxis: { type: "category", data: runs.map((r) => r.name || r.id),
+                 axisLabel: { color: css("--muted"), width: 220, overflow: "truncate" } },
+        series: [{
+          type: "bar", data: runs.map((r) => r[k]), barMaxWidth: 14,
+          itemStyle: { color: IND[k].colour, opacity: 0.85 },
+          label: { show: true, position: "right", color: css("--muted"), fontSize: 11,
+                   formatter: (p) => fmtInd(p.value) },
+        }],
+      }, { replaceMerge: ["series", "xAxis", "yAxis"] });
+    }
+    select.addEventListener("change", updateRank);
+    updateRank();
+
+    makeChart(document.getElementById("gscatter"), {
+      tooltip: { trigger: "item", formatter: (p) =>
+        `${esc(p.data[2])}<br>HV <b>${fmtInd(p.data[0])}</b> · IGD <b>${fmtInd(p.data[1])}</b>` },
+      xAxis: { name: "hypervolume (higher is better)", nameLocation: "middle", nameGap: 28,
+               scale: true, axisLabel: { formatter: (v) => fmtInd(v), color: css("--muted") } },
+      yAxis: { name: "IGD (lower is better)", nameLocation: "end", nameRotate: 0, nameGap: 14,
+               nameTextStyle: { align: "left", color: css("--muted") }, scale: true,
+               axisLabel: { formatter: (v) => fmtInd(v), color: css("--muted") } },
+      series: [{
+        type: "scatter", symbolSize: 11,
+        data: scored.map((r) => [r.hv, r.igd, r.name || r.id]),
+        itemStyle: { color: PALETTE[0], opacity: 0.85 },
+      }],
+    });
+
+    footMeta.textContent = `${group.problem} · ${group.runs.length} comparable runs`;
+  }
+
   // --------------------------------------------------------------- routing
 
   async function route() {
     const hash = location.hash.replace(/^#/, "") || "/";
-    const m = hash.match(/^\/exp\/([^/]+)/);
+    const exp = hash.match(/^\/exp\/([^/]+)/);
+    const grp = hash.match(/^\/group\/(.+)$/);
     render(`<p class="loading">Loading…</p>`);
     try {
-      if (m) await renderDetail(decodeURIComponent(m[1]));
+      if (exp) await renderDetail(decodeURIComponent(exp[1]));
+      else if (grp) await renderGroup(decodeURIComponent(grp[1]));
       else await renderList();
       window.scrollTo(0, 0);
     } catch (err) {

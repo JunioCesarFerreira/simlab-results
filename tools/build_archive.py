@@ -16,10 +16,18 @@ Two outputs are written, with different jobs:
     What the web viewer reads. Split so a page loads one small file instead of
     a 100 MB one, and rounded to the precision the charts actually use:
 
-    index.json              one summary row per experiment       (~60 KB)
+    index.json              one summary row per experiment       (~35 KB)
+    groups.json             the comparable groups, their reference
+                            fronts and every run's indicators
     exp/<id>/core.json      generations, objectives, pareto,
                             per-simulation network metrics       (median 0.3 MB)
     exp/<id>/chromosomes.json  relay coordinates for the topology view
+    exp/<id>/metrics.json   hypervolume, GD and IGD per generation
+
+The last two lines of ``data/`` are produced by ``tools/compute_metrics.py``,
+which this script runs as its final step. The indicators are precomputed
+because the viewer cannot afford them: IGD is O(|reference| x |front|) per
+generation, over 1 153 generations.
 
 Usage:
     python tools/build_archive.py --input ../simlab/experiments_export
@@ -36,6 +44,10 @@ import shutil
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from compute_metrics import build_metrics  # noqa: E402
 
 # Coordinates and objectives are stored at full float64 in Mongo
 # (-13.203721577336898). Nothing in the viewer resolves past these.
@@ -166,6 +178,8 @@ def main() -> int:
                         help="Archive root (default: the repository root)")
     parser.add_argument("--skip-raw", action="store_true",
                         help="Only rebuild data/, leaving raw/ untouched")
+    parser.add_argument("--skip-metrics", action="store_true",
+                        help="Leave the quality indicators uncomputed")
     args = parser.parse_args()
 
     src = Path(args.input)
@@ -232,7 +246,14 @@ def main() -> int:
 
     print(f"\nraw/   {raw_bytes / 1048576:7.1f} MB   (lossless, gzip -9)")
     print(f"data/  {data_bytes / 1048576:7.1f} MB   ({len(summaries)} experiments)")
-    return 0
+
+    if args.skip_metrics:
+        print("\nQuality indicators skipped — data/ has no groups.json and the viewer\n"
+              "will render the archive without them.")
+        return 0
+
+    print("\nQuality indicators")
+    return build_metrics(root)
 
 
 if __name__ == "__main__":
