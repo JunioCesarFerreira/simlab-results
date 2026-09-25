@@ -1,0 +1,37 @@
+{
+  "title": "SimLab: Cooja simulation metrics for multi-objective WSN topology optimisation",
+  "upload_type": "dataset",
+  "description": "<p>Per-node network metric samples and Cooja log residues from 41 multi-objective optimisation experiments run with <a href=\"https://github.com/JunioCesarFerreira/simlab\">SimLab</a>, a platform that evaluates wireless sensor network topologies by simulating them in Cooja/Contiki-NG.</p><p><strong>Contents.</strong> <code>metrics/</code> holds one Parquet file per experiment: every per-node metric sample emitted during every simulation, in chronological order, with the simulation id, the Cooja timestamp (<code>t_us</code>, where the log generation recorded it) and the mote index as columns. <code>logs/</code> holds, per experiment, a zstd-compressed tar of what remains of each Cooja log once the sample records are removed: boot banner, RPL parent changes and reachability probes. <code>manifest.json</code> carries counts, byte sizes and a SHA-256 for every file.</p><p><strong>How it was derived.</strong> The database stored, per simulation, a full Cooja log and a CSV of metric samples. The CSV was exactly the log's sample records permuted (grouped by node rather than chronological), so the samples were extracted from the log — which additionally carries the timestamp and mote prefix the CSV drops — and the CSV is not carried over. Sorting a Parquet file by <code>node</code> reproduces the original CSV row for row.</p><p><strong>What is not here.</strong> The complete Cooja logs, the per-simulation <code>.csc</code> and <code>.pos</code> inputs, topology images and pre-rendered analysis charts were not preserved. The experiment records themselves — configurations, Pareto fronts, individuals, objectives and DODAG trees — are in the companion repository.</p>",
+  "creators": [
+    {
+      "name": "Ferreira, Junio Cesar",
+      "affiliation": "",
+      "orcid": ""
+    }
+  ],
+  "keywords": [
+    "wireless sensor networks",
+    "Contiki-NG",
+    "Cooja",
+    "NSGA-III",
+    "multi-objective optimisation",
+    "RPL",
+    "network simulation"
+  ],
+  "license": "cc-by-4.0",
+  "access_right": "open",
+  "version": "1.0.0",
+  "language": "eng",
+  "related_identifiers": [
+    {
+      "identifier": "https://github.com/JunioCesarFerreira/simlab-results",
+      "relation": "isSupplementTo",
+      "resource_type": "dataset"
+    },
+    {
+      "identifier": "https://github.com/JunioCesarFerreira/simlab",
+      "relation": "isDerivedFrom",
+      "resource_type": "software"
+    }
+  ]
+}

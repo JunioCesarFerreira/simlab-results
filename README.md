@@ -61,6 +61,8 @@ reference/                 data not reachable from an experiment
 
 tools/build_archive.py     rebuilds data/ and raw/ from a database export
 tools/export_reference.py  captures reference/ straight from MongoDB
+tools/build_gridfs_dataset.py  distils the Cooja simulation output (§ below)
+tools/zenodo_upload.py     deposits that dataset on Zenodo
 tools/compute_metrics.py   computes the quality indicators into data/
 tools/moo_metrics.py       hypervolume, GD, IGD — standard library only
 ```
@@ -137,6 +139,27 @@ raw logs are not.
 
 This matters for reproducibility: the archive documents *what the optimisation
 found*, not enough to replay a specific Cooja run byte-for-byte.
+
+### The simulation dataset, published separately
+
+Most of that volume is recoverable in a far smaller form, and is deposited on
+Zenodo rather than committed here — it is ~15 GB, which belongs in a data
+repository, not in git.
+
+Every `{"node": ...}` line in a Cooja log is one metric sample with all 21 key
+names repeated, and `sim_result.csv` was exactly those samples permuted. So the
+samples are extracted from the logs into Parquet — keeping the `t_us`/`mote`
+prefix the CSV dropped — and the CSV is not carried over: sorting the Parquet
+by `node` reproduces it row for row. What remains of each log is kept verbatim,
+compressed. That is ~30x smaller with nothing lost but the redundancy.
+
+```bash
+python tools/build_gridfs_dataset.py --output ../simlab-dataset
+```
+
+See [docs/ZENODO_DEPOSIT.md](docs/ZENODO_DEPOSIT.md) for depositing it with a
+DOI, and [docs/dataset-README.md](docs/dataset-README.md) for the dataset's own
+documentation.
 
 ## Reading the data without the viewer
 
