@@ -9,6 +9,10 @@ simulations.
 
 **https://juniocesarferreira.github.io/simlab-results/**
 
+> Publishing requires Pages to be enabled once, under
+> **Settings → Pages → Build and deployment → Source: GitHub Actions**.
+> Until then the deploy workflow fails with `Get Pages site failed … Not Found`.
+
 The viewer needs no server and no build step. Open `index.html` from a local
 copy and it works the same as it does on the web.
 

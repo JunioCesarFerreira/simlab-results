@@ -23,12 +23,18 @@ jobs:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/configure-pages@v5
+      - uses: actions/checkout@v7
+      - uses: actions/configure-pages@v6
       # The site is served straight from the repository: the viewer has no
       # build step, and data/ and raw/ are committed artifacts.
-      - uses: actions/upload-pages-artifact@v3
+      #
+      # This step fails with "Get Pages site failed ... Not Found" until Pages
+      # is enabled for the repository under Settings > Pages, with Source set
+      # to "GitHub Actions". configure-pages can do that itself via its
+      # "enablement" input, but only with a PAT — that input does not work with
+      # the default GITHUB_TOKEN.
+      - uses: actions/upload-pages-artifact@v5
         with:
           path: .
       - id: deployment
-        uses: actions/deploy-pages@v4
+        uses: actions/deploy-pages@v5
