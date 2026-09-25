@@ -48,9 +48,11 @@
     return h ? `${h}h ${m}m` : `${m}m`;
   }
 
+  // The status is namespaced: a generation with status "Error" would otherwise
+  // pick up the .error class used for the page-level failure box.
   function statusPill(s) {
-    const cls = String(s || "").toLowerCase();
-    return `<span class="pill ${esc(cls)}">${esc(s || "—")}</span>`;
+    const cls = String(s || "").toLowerCase().replace(/[^a-z0-9]+/g, "-");
+    return `<span class="pill s-${esc(cls)}">${esc(s || "—")}</span>`;
   }
 
   function disposeCharts() {
