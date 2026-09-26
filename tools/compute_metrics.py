@@ -14,10 +14,13 @@ by the reference front's ideal-nadir range — so a number here and the same
 number in the live GUI mean the same thing. ``tools/check_parity.py`` holds that
 claim to moocore, the library the platform computes with.
 
-Each generation is measured on the non-dominated subset of its **offspring**
-(Q_t): the individuals that generation evaluated, which is what every
-generation document records. The survivor set P_t, which the live GUI prefers,
-was persisted for only 6 of the 51 archived runs.
+Each generation is measured on the non-dominated subset of the **survivor
+set** P_t — the population environmental selection kept, which is what the
+search carries forward and what the live GUI plots. Only 6 of the 51 archived
+runs recorded it; the other 45 predate the field and fall back to their
+offspring Q_t, the individuals that generation evaluated. Every generation
+records which set it used, and the run reports ``population_source``:
+``survivors``, ``offspring``, or ``mixed`` for a series that is neither.
 
 The viewer only plots numbers.
 
@@ -132,37 +135,66 @@ def load_group_points(experiments, cores, signs, names):
 
 
 def run_fronts(core, signs, names):
-    """(final front, [(generation index, feasible, infeasible, front)]) in
-    min-space. The final front is the recorded Pareto front where there is
-    one, and the last generation's own front otherwise — a cancelled run never
-    got to record a front."""
+    """(final front, [generation records], unresolved survivor count) in
+    min-space.
+
+    Each generation is measured on the **survivor set** P_t where the run
+    recorded one: the population environmental selection kept, which is what
+    the search carries forward and what the live GUI plots. Most survivors were
+    evaluated in an *earlier* generation — 4 663 of 5 050 in the longest run —
+    so they are resolved against every individual the run ever evaluated, not
+    against the generation's own. Runs that predate the field fall back to
+    their offspring Q_t, and each generation says which set it used.
+
+    The final front is the recorded Pareto front where there is one, and the
+    last generation's own front otherwise — a cancelled run never got to
+    record a front.
+    """
     order = {g["id"]: (g.get("index") if g.get("index") is not None else 0)
              for g in core["generations"]}
 
-    feasible = {}
-    infeasible = {}
+    # None marks an infeasible individual: it is still a member of the set, it
+    # just contributes no point.
+    by_hash = {}
+    offspring = {}
     for ind in core["individuals"]:
-        index = order.get(ind.get("gen"))
-        if index is None:
-            continue
-        feasible.setdefault(index, [])
-        infeasible.setdefault(index, 0)
         values = as_list(ind.get("obj"), names)
-        if is_feasible(values):
-            feasible[index].append(tuple(s * v for s, v in zip(signs, values)))
-        else:
-            infeasible[index] += 1
+        point = (tuple(s * v for s, v in zip(signs, values))
+                 if is_feasible(values) else None)
+        if ind.get("iid") is not None:
+            by_hash[ind["iid"]] = point
+        index = order.get(ind.get("gen"))
+        if index is not None:
+            offspring.setdefault(index, []).append(point)
 
-    generations = [
-        (index, len(feasible[index]), infeasible[index], nondominated(feasible[index]))
-        for index in sorted(feasible)
-    ]
+    generations, unresolved = [], 0
+    for gen in sorted(core["generations"], key=lambda g: order[g["id"]]):
+        index = order[gen["id"]]
+        keep = gen.get("survivors")
+        if keep:
+            points = [by_hash[h] for h in keep if h in by_hash]
+            unresolved += sum(1 for h in keep if h not in by_hash)
+            source = "survivors"
+        elif index in offspring:
+            points = offspring[index]
+            source = "offspring"
+        else:
+            continue
+        feasible = [p for p in points if p is not None]
+        generations.append({
+            "index": index,
+            "source": source,
+            "feasible": len(feasible),
+            "infeasible": len(points) - len(feasible),
+            "front": nondominated(feasible),
+        })
 
     final = [tuple(s * v for s, v in zip(signs, values))
              for values in (as_list(p.get("obj"), names) for p in core["pareto"])
              if is_feasible(values)]
-    final = nondominated(final) if final else (generations[-1][3] if generations else [])
-    return final, generations
+    final = nondominated(final) if final else (
+        generations[-1]["front"] if generations else [])
+    return final, generations, unresolved
 
 
 def indicators(front, ideal, spread, reference, ref_point, empty_hv=None):
@@ -232,18 +264,27 @@ def build_metrics(root: Path) -> int:
         finals = []
         for row in members:
             core = cores[row["id"]]
-            final, generations = run_fronts(core, signs, names)
+            final, generations, unresolved = run_fronts(core, signs, names)
+            if unresolved:
+                print(f"  ! {row['name']}: {unresolved} survivor hashes match no"
+                      f" evaluated individual", file=sys.stderr)
 
             per_gen = [
                 {
-                    "index": gen_index,
-                    "feasible": feasible,
-                    "infeasible": infeasible,
-                    **indicators(front, ideal, spread, reference, ref_point,
+                    "index": g["index"],
+                    "source": g["source"],
+                    "feasible": g["feasible"],
+                    "infeasible": g["infeasible"],
+                    **indicators(g["front"], ideal, spread, reference, ref_point,
                                  empty_hv=0.0),
                 }
-                for gen_index, feasible, infeasible, front in generations
+                for g in generations
             ]
+            # "mixed" is the GUI's word for a series that is not one set: it
+            # must not be read as a survivor trajectory. A run with no
+            # generation at all reports neither.
+            used = {g["source"] for g in generations}
+            population_source = (used.pop() if len(used) == 1 else "mixed") if used else None
 
             summary = indicators(final, ideal, spread, reference, ref_point)
             out = {
@@ -251,11 +292,12 @@ def build_metrics(root: Path) -> int:
                 "objectives": objectives,
                 "hv_reference_point": HV_REF,
                 "reference_front_size": len(reference),
-                # Every generation document records the individuals evaluated in
-                # it — the offspring, Q_t. The survivor set P_t was persisted for
-                # only 6 of the 51 runs, so that is the one series the whole
-                # archive can show. Same meaning as the live GUI's "Offspring".
-                "population": "offspring",
+                # What was asked for, and what could actually be used: the
+                # survivor set P_t where the run recorded one, its offspring
+                # Q_t where it did not. Same contract as the live GUI's
+                # population / population_source pair.
+                "population": "survivors",
+                "population_source": population_source,
                 "final": {**summary,
                           "source": "pareto_front" if core["pareto"] else "last_generation"},
                 "generations": per_gen,

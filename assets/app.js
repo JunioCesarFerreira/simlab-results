@@ -101,6 +101,14 @@
 
   const PALETTE = ["#3f7fb0", "#c9772f", "#2f6f4f", "#8a5fa8", "#b04f6a", "#5f8f3f"];
 
+  // An infeasible individual is scored with a ~1.01e9 penalty in every
+  // objective (negated where the objective is maximised). It is a marker, not
+  // a measurement, and nothing plots it: on a run that is half infeasible it
+  // drags the median to 1e9 and flattens every real value onto the axis.
+  // Same threshold as tools/moo_metrics.py and the platform's own.
+  const PENALTY = 1e8;
+  const measured = (v) => Number.isFinite(v) && Math.abs(v) < PENALTY;
+
   /** Follows the CSS: an explicit data-theme wins, otherwise the OS setting. */
   function isDark() {
     const forced = document.documentElement.getAttribute("data-theme");
@@ -130,6 +138,51 @@
     };
   }
 
+  /** A tick formatter for a value axis, given the values it will carry.
+
+      compactNum alone keeps one decimal, so an energy axis spanning
+      2.30M–2.52M prints "2.3M, 2.4M, 2.4M, 2.4M, 2.5M, 2.5M" — labels that
+      repeat, and on a parallel axis overlap each other. The formatter cannot
+      see the tick step, so it is worked out here from the data and baked in. */
+  function compactFor(values, intervals = 6) {
+    const finite = values.filter(Number.isFinite);
+    if (!finite.length) return compactNum;
+    const span = Math.max(...finite) - Math.min(...finite);
+    const scale = Math.max(...finite.map(Math.abs));
+    // "0.5k" is a worse label than "500": switch units only once the plain
+    // number gets long.
+    const unit = scale >= 1e9 ? 1e9 : scale >= 1e6 ? 1e6 : scale >= 1e4 ? 1e3 : 1;
+    const suffix = unit === 1e9 ? "G" : unit === 1e6 ? "M" : unit === 1e3 ? "k" : "";
+    if (!(span > 0)) return compactNum;
+    // ECharts lands on roughly six intervals; a label needs to resolve one.
+    const step = span / intervals / unit;
+    const decimals = Math.max(0, Math.min(4, Math.ceil(-Math.log10(step))));
+    return (v) => {
+      if (v === 0) return "0";
+      // Only fall back to exponent notation when the chosen precision would
+      // round the value away — not for every value under 0.01, which would
+      // print "5.0e-3" next to "0.010".
+      if (unit === 1 && Math.abs(v) < Math.pow(10, -decimals)) return v.toExponential(1);
+      return (v / unit).toFixed(decimals) + suffix;
+    };
+  }
+
+  /** Round an axis range outwards to a whole number of nice steps.
+
+      A parallel axis given a raw min/max labels those exact bounds on top of
+      its own nice ticks, so "2.33M" ends up printed across "2.30M". Rounding
+      the bounds to the tick grid makes the boundary label a tick like any
+      other — and gives the axis round endpoints into the bargain. */
+  function niceBounds(lo, hi, intervals = 6) {
+    if (!(hi > lo)) return [lo - 0.5, hi + 0.5];
+    const raw = (hi - lo) / intervals;
+    const mag = Math.pow(10, Math.floor(Math.log10(raw)));
+    const norm = raw / mag;
+    const step = (norm <= 1 ? 1 : norm <= 2 ? 2 : norm <= 5 ? 5 : 10) * mag;
+    const round = (v) => +v.toPrecision(12);
+    return [round(Math.floor(lo / step) * step), round(Math.ceil(hi / step) * step)];
+  }
+
   /** Axis labels: 5,436,228 is nine characters of noise on a tick. */
   function compactNum(v) {
     const n = Math.abs(v);
@@ -138,6 +191,17 @@
     if (n >= 1e3) return (v / 1e3).toFixed(1).replace(/\.0$/, "") + "k";
     if (n > 0 && n < 0.01) return v.toExponential(1);
     return String(Math.round(v * 100) / 100);
+  }
+
+  /** Axis ticks for the indicator panels. compactNum rounds to two decimals,
+      which turns the ticks 0.016…0.021 into six labels all reading "0.02";
+      these need whatever precision the tick step actually carries. */
+  function fmtAxisNum(v) {
+    if (v === 0) return "0";
+    const n = Math.abs(v);
+    if (n >= 1e6) return (v / 1e6).toFixed(1).replace(/\.0$/, "") + "M";
+    if (n >= 1e3) return (v / 1e3).toFixed(1).replace(/\.0$/, "") + "k";
+    return String(+v.toPrecision(12));
   }
 
   // Objective values arrive as an array on individuals and as a name-keyed
@@ -423,26 +487,32 @@
         const y = objValue(p.obj, iy, objs[iy].name);
         const c = ic >= 0 ? objValue(p.obj, ic, objs[ic].name) : undefined;
         return [x, y, c];
-      }).filter((p) => Number.isFinite(p[0]) && Number.isFinite(p[1]));
+      }).filter((p) => measured(p[0]) && measured(p[1]));
 
       const cs = pts.map((p) => p[2]).filter(Number.isFinite);
+      // Above the plot, not below it: at the bottom the colour bar and the
+      // x-axis name are both centred and land on each other.
       const visualMap = ic >= 0 && cs.length ? {
         min: Math.min(...cs), max: Math.max(...cs), dimension: 2,
-        calculable: true, orient: "horizontal", left: "center", bottom: 0,
+        calculable: true, orient: "horizontal", left: "center", top: 0,
+        itemHeight: 90,
         text: [objs[ic].name, ""], textStyle: { color: css("--muted") },
         inRange: { color: ["#3f7fb0", "#7fae7a", "#c9772f"] },
       } : null;
 
+      const fmtX = compactFor(pts.map((p) => p[0]));
+      const fmtY = compactFor(pts.map((p) => p[1]));
+
       chart.setOption({
         visualMap: visualMap || { show: false },
         xAxis: { name: objs[ix].name, nameLocation: "middle", nameGap: 30, scale: true,
-                 axisLabel: { formatter: compactNum, color: css("--muted") } },
+                 axisLabel: { formatter: fmtX, color: css("--muted") } },
         // The y name sits above the axis, horizontal: rotated in the middle it
         // collides with wide tick labels like 5,436,228.
         yAxis: { name: objs[iy].name, nameLocation: "end", nameRotate: 0, nameGap: 14,
                  nameTextStyle: { align: "left", color: css("--muted") }, scale: true,
-                 axisLabel: { formatter: compactNum, color: css("--muted") } },
-        grid: { left: 52, right: 24, top: 38, bottom: visualMap ? 68 : 46, containLabel: true },
+                 axisLabel: { formatter: fmtY, color: css("--muted") } },
+        grid: { left: 52, right: 24, top: visualMap ? 54 : 38, bottom: 52, containLabel: true },
         tooltip: {
           formatter: (p) =>
             `${esc(objs[ix].name)}: <b>${fmtNum(p.value[0])}</b><br>` +
@@ -495,9 +565,16 @@
     // one of them moves a 240-individual mean by four orders of magnitude.
     const bottomPad = 48;  // room for the x-axis labels and its name
     const height = Math.max(180, 120 * objs.length + bottomPad + 20);
+    const dropped = core.individuals.filter((ind) =>
+      objs.some((o, i) => !measured(objValue(ind.obj, i, o.name)))).length;
+
     wrap.innerHTML = `<div id="evo" class="chart" style="height:${height}px"></div>
       <p class="note">Solid line: best value reached in that generation.
-      Dashed: population median. One panel per objective, each on its own scale.</p>`;
+      Dashed: population median. One panel per objective, each on its own scale.
+      ${dropped ? `${dropped.toLocaleString()} of
+      ${core.individuals.length.toLocaleString()} individuals were infeasible and
+      are not plotted — their penalty score is ~1e9, which would flatten every
+      real value onto the axis. A generation with none left is a gap.` : ""}</p>`;
 
     const grids = [], xAxes = [], yAxes = [], series = [], titles = [];
     const topPad = 26, gap = 34;
@@ -508,7 +585,7 @@
       for (const g of gens) {
         const vals = buckets.get(g)
           .map((ob) => objValue(ob, i, o.name))
-          .filter(Number.isFinite)
+          .filter(measured)
           .sort((a, b) => a - b);
         if (!vals.length) { best.push(null); mid.push(null); continue; }
         best.push(o.goal === "max" ? vals[vals.length - 1] : vals[0]);
@@ -531,7 +608,10 @@
       });
       yAxes.push({
         type: "value", scale: true, gridIndex: i,
-        axisLabel: { formatter: compactNum, color: css("--muted") },
+        axisLabel: {
+          formatter: compactFor([...best, ...mid]),
+          color: css("--muted"),
+        },
       });
       series.push({
         name: `${o.name} best`, type: "line", data: best,
@@ -655,6 +735,21 @@
 
   const indColour = (key) => metricPalette()[IND[key].hue];
 
+  /** Bar labels for a set of runs. Five of the DTLZ2 runs are called
+      "dtlz2-nsga3-m3-n2" and three of the problem1 ones share a sentence-long
+      name that truncates to the same thing, so a chart of them is a column of
+      identical labels. Names are shortened to fit and the ambiguous ones carry
+      the tail of their id. */
+  function runLabels(runs) {
+    const seen = new Map();
+    runs.forEach((r) => seen.set(r.name, (seen.get(r.name) || 0) + 1));
+    return runs.map((r) => {
+      const name = r.name || r.id;
+      const short = name.length > 30 ? name.slice(0, 29) + "…" : name;
+      return seen.get(r.name) > 1 ? `${short} · ${String(r.id).slice(-6)}` : short;
+    });
+  }
+
   /** Where this run places among the comparable runs, 1 = best. */
   function rankIn(group, id, key) {
     if (!group) return null;
@@ -710,6 +805,25 @@
     drawGroupBars(group, id);
   }
 
+  // Which set a generation is measured on, in the live GUI's words.
+  const POPULATION = {
+    survivors: {
+      label: "Survivors (P<sub>t</sub>)",
+      hint: `the population environmental selection kept — what the search
+             carries forward into the next generation`,
+    },
+    offspring: {
+      label: "Offspring (Q<sub>t</sub>)",
+      hint: `only the children evaluated in that generation — it swings with
+             each batch, and can drop while the search still holds a better parent`,
+    },
+    mixed: {
+      label: "Mixed",
+      hint: `survivors for some generations and offspring for others — not one
+             trajectory, and not to be read as one`,
+    },
+  };
+
   /** The three indicators over the generations of one run, laid out as in the
       live SimLab GUI: one panel each, HV | GD | IGD, so a near-zero GD next to
       a large IGD stays readable instead of collapsing onto one axis. */
@@ -729,32 +843,46 @@
       return;
     }
 
+    const source = metrics.population_source || "offspring";
+    const set = POPULATION[source] || POPULATION.offspring;
+    const fellBack = source !== "survivors";
+    const fallbackGens = source === "mixed"
+      ? gens.filter((g) => g.source === "offspring").map((g) => g.index) : [];
+
     wrap.innerHTML = `
       <div class="measured">
         <span class="measured-label">Measured set</span>
-        <span class="pill s-done">Offspring (Q<sub>t</sub>)</span>
-        <span class="note" style="margin:0">the individuals each generation
-          evaluated — it swings with every batch, and can drop while the search
-          still holds a better parent</span>
+        <span class="pill ${fellBack ? "s-fallback" : "s-done"}">${set.label}</span>
+        <span class="note" style="margin:0">${set.hint}</span>
       </div>
       <div class="hvgd">
         <div id="c-hv" class="hvgd-panel" role="img"
-             aria-label="Hypervolume per generation, measured on the offspring"></div>
+             aria-label="Hypervolume per generation, measured on the ${esc(source)}"></div>
         <div id="c-gd" class="hvgd-panel" role="img"
              aria-label="Generational distance per generation"></div>
         <div id="c-igd" class="hvgd-panel" role="img"
              aria-label="Inverted generational distance per generation"></div>
       </div>
-      <p class="note">Each generation is measured on the non-dominated subset of
-        its own offspring, not on the best found so far, so these curves can dip
-        when a generation explores. The live GUI can measure the survivor set
-        P<sub>t</sub> instead; the archive cannot, because survivors were
-        persisted for only 6 of its 51 runs. A generation with no feasible
-        individual encloses no volume — HV 0 — and its distances are left as a
-        gap rather than a zero that would read as perfect convergence.</p>`;
+      <p class="note">${source === "survivors"
+        ? `Measured on the survivor set each generation kept, resolved across the
+           whole run — most survivors were evaluated in an earlier generation.`
+        : source === "mixed"
+        ? `<strong>Survivors where the run recorded them, offspring for
+           generation${fallbackGens.length === 1 ? "" : "s"}
+           ${fallbackGens.join(", ")}</strong>, which recorded none. The two are
+           different populations; this series is not one trajectory.`
+        : `<strong>This run recorded no survivor set</strong>, so the series falls
+           back to the offspring — the individuals it evaluated in each
+           generation. 45 of the 51 archived runs predate the field.`}
+        The set is reduced to its non-dominated subset before measuring, and the
+        measurement is of that generation alone, not of the best found so far.
+        A generation with no feasible individual encloses no volume — HV 0 — and
+        its distances are left as a gap rather than a zero that would read as
+        perfect convergence.</p>`;
 
     const c = metricPalette();
-    const labels = gens.map((g) => `Gen ${g.index}`);
+    const labels = gens.map((g) => (source === "mixed"
+      ? `Gen ${g.index} (${g.source})` : `Gen ${g.index}`));
 
     const base = (name, digits) => ({
       animation: false,
@@ -772,18 +900,23 @@
           return `${esc(params[0].name)}<br>${rows}`;
         },
       },
-      grid: { top: 34, right: 18, bottom: 34, left: 52, containLabel: true },
+      // Fixed, identical geometry in all three panels — with containLabel the
+      // plot area follows each panel's own label widths and the three x axes
+      // stop lining up with each other.
+      grid: { top: 30, right: 20, bottom: 40, left: 60, containLabel: false },
       xAxis: {
         type: "category", data: labels,
         axisLine: { lineStyle: { color: c.grid } },
         axisTick: { lineStyle: { color: c.grid } },
         axisLabel: { color: c.muted, fontSize: 11 },
       },
+      // Zero-based, as in the live GUI: an axis cropped to the data makes a
+      // 2% wobble look like a collapse.
       yAxis: {
-        type: "value", name, scale: true,
+        type: "value", name,
         nameTextStyle: { color: c.muted, fontSize: 11 },
         axisLine: { show: false },
-        axisLabel: { color: c.muted, fontSize: 10, formatter: compactNum },
+        axisLabel: { color: c.muted, fontSize: 10, formatter: fmtAxisNum },
         splitLine: { lineStyle: { color: c.grid, type: "dashed" } },
       },
     });
@@ -814,7 +947,7 @@
     makeChart(document.getElementById("c-igd"), {
       ...base("IGD", 4),
       legend: {
-        top: 2, right: 2, itemWidth: 14, itemHeight: 8,
+        top: 2, right: 8, itemWidth: 14, itemHeight: 8,
         textStyle: { color: c.muted, fontSize: 10 }, data: ["IGD", "IGD+"],
       },
       series: [
@@ -862,17 +995,24 @@
         grid: { left: 8, right: 60, top: 10, bottom: 34, containLabel: true },
         xAxis: { type: "value", axisLabel: { formatter: (v) => fmtInd(v), color: css("--muted") } },
         yAxis: {
-          type: "category", data: runs.map((r) => r.name || r.id),
-          axisLabel: {
-            color: css("--muted"), width: 190, overflow: "truncate",
-            formatter: (v) => v,
-          },
+          type: "category", data: runLabels(runs),
+          axisLabel: { color: css("--muted"), width: 250, overflow: "truncate" },
         },
         series: [{
-          type: "bar", data: runs.map((r) => r[key]), barMaxWidth: 14,
-          itemStyle: {
-            color: (p) => (runs[p.dataIndex].id === id ? indColour(key) : css("--border")),
-          },
+          type: "bar", barMaxWidth: 14,
+          // Styled per bar rather than through an itemStyle callback: ECharts
+          // takes a function for `color`, but not for `opacity` — passing one
+          // silently left every bar at full strength and this run stopped
+          // standing out at all.
+          data: runs.map((r) => ({
+            value: r[key],
+            itemStyle: {
+              // The border colour left the other runs almost invisible; the
+              // same hue, faded, reads as context rather than as absence.
+              color: indColour(key),
+              opacity: r.id === id ? 1 : 0.3,
+            },
+          })),
           label: {
             show: true, position: "right", color: css("--muted"), fontSize: 11,
             formatter: (p) => fmtInd(p.value),
@@ -897,8 +1037,7 @@
     }
 
     const feasible = (values) =>
-      values.length === objs.length &&
-      values.every((v) => Number.isFinite(v) && Math.abs(v) < 1e8);
+      values.length === objs.length && values.every(measured);
 
     const fromPareto = core.pareto
       .map((p) => objs.map((o, i) => objValue(p.obj, i, o.name)))
@@ -933,18 +1072,25 @@
         <label for="pcol">Colour by</label>
         <select id="pcol">${objs.map((o, i) =>
           `<option value="${i}">${esc(o.name)}</option>`).join("")}</select>
+        ${group ? `<label for="pscale">Axes</label>
+        <select id="pscale">
+          <option value="run">This run's range</option>
+          <option value="group">Whole group's range</option>
+        </select>` : ""}
       </div>
       <div id="par" class="chart" style="height:340px"></div>
       <p class="note">Every axis points the same way: <strong>best at the top</strong>
         (lowest for an objective being minimised, highest for one being maximised), so a
         line that stays high is good everywhere and crossing lines are a trade-off.
-        ${group ? `Axes span the range of the reference front for
-        ${esc(group.problem)}, so the picture is comparable between runs.` : ""}
+        Axes span what this run found${group ? `; switch them to the whole group's
+        range to see where that sits among the other runs of ${esc(group.problem)} —
+        at the cost of squashing this one into its own slice of the axis` : ""}.
         Lines are capped at 2 000 — beyond that the plot is ink, not information.</p>`;
 
     const chart = makeChart(document.getElementById("par"), {});
     const pick = document.getElementById("ps");
     const colour = document.getElementById("pcol");
+    const scale = document.getElementById("pscale");
 
     const LIMIT = 2000;
     function thin(rows) {
@@ -958,20 +1104,35 @@
       const dim = +colour.value;
       const column = rows.map((r) => r[dim]).filter(Number.isFinite);
 
+      const wide = scale && scale.value === "group" && group;
+      const last = objs.length - 1;
+
       const axes = objs.map((o, i) => {
-        const bounds = group?.objectives?.[i];
+        const bounds = wide ? group.objectives[i] : null;
         const values = rows.map((r) => r[i]).filter(Number.isFinite);
-        let lo = bounds ? Math.min(bounds.best, bounds.worst) : Math.min(...values);
-        let hi = bounds ? Math.max(bounds.best, bounds.worst) : Math.max(...values);
+        const rawLo = bounds ? Math.min(bounds.best, bounds.worst) : Math.min(...values);
+        const rawHi = bounds ? Math.max(bounds.best, bounds.worst) : Math.max(...values);
         // An objective every solution agrees on collapses the axis to a point.
-        if (!(hi > lo)) { lo -= 0.5; hi += 0.5; }
+        const [lo, hi] = niceBounds(rawLo, rawHi);
         return {
           dim: i, name: `${o.name} (${o.goal})`,
           min: lo, max: hi,
           // Best at the top: a minimised axis therefore counts downwards.
           inverse: o.goal !== "max",
-          nameTextStyle: { color: css("--muted") },
-          axisLabel: { formatter: compactNum, color: css("--muted") },
+          // The name goes at the FOOT of every axis. Left to itself, ECharts
+          // puts it at the axis's far end, which `inverse` flips — so a run
+          // with one maximised objective gets that one name at the top while
+          // the rest sit at the bottom.
+          nameLocation: o.goal === "max" ? "start" : "end",
+          nameTextStyle: {
+            color: css("--muted"),
+            // The outermost names would otherwise run off the canvas.
+            align: i === 0 ? "left" : i === last ? "right" : "center",
+          },
+          // A parallel axis with a forced min/max also labels the boundary
+          // itself, which lands a tick's width from the last nice tick — so it
+          // needs finer labels than a grid axis to keep the two apart.
+          axisLabel: { formatter: compactFor([lo, hi]), color: css("--muted") },
           axisLine: { lineStyle: { color: css("--border") } },
           axisTick: { lineStyle: { color: css("--border") } },
         };
@@ -985,11 +1146,12 @@
         },
         visualMap: column.length ? {
           min: Math.min(...column), max: Math.max(...column), dimension: dim,
-          calculable: true, orient: "horizontal", left: "center", bottom: 0,
+          calculable: true, orient: "horizontal", left: "center", top: 0,
+          itemHeight: 90,
           text: [objs[dim].name, ""], textStyle: { color: css("--muted") },
           inRange: { color: ["#3f7fb0", "#7fae7a", "#c9772f"] },
         } : { show: false },
-        parallel: { left: 46, right: 46, top: 26, bottom: 74 },
+        parallel: { left: 56, right: 56, top: column.length ? 62 : 26, bottom: 44 },
         parallelAxis: axes,
         series: [{
           type: "parallel", data: rows, smooth: false,
@@ -999,7 +1161,8 @@
       }, { replaceMerge: ["series", "parallelAxis", "visualMap"] });
     }
 
-    [pick, colour].forEach((el) => el.addEventListener("change", update));
+    [pick, colour, scale].filter(Boolean)
+      .forEach((el) => el.addEventListener("change", update));
     update();
   }
 
@@ -1082,8 +1245,8 @@
           `${esc(runs[p.dataIndex].name)}<br>${esc(k.toUpperCase())}: <b>${fmtInd(p.value)}</b>` },
         grid: { left: 8, right: 60, top: 10, bottom: 34, containLabel: true },
         xAxis: { type: "value", axisLabel: { formatter: (v) => fmtInd(v), color: css("--muted") } },
-        yAxis: { type: "category", data: runs.map((r) => r.name || r.id),
-                 axisLabel: { color: css("--muted"), width: 220, overflow: "truncate" } },
+        yAxis: { type: "category", data: runLabels(runs),
+                 axisLabel: { color: css("--muted"), width: 250, overflow: "truncate" } },
         series: [{
           type: "bar", data: runs.map((r) => r[k]), barMaxWidth: 14,
           itemStyle: { color: indColour(k), opacity: 0.85 },

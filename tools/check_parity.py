@@ -134,10 +134,11 @@ def archive_cases(root: Path):
         hv_ref = [cmet.HV_REF] * len(names)
 
         for row in members:
-            _, generations = cmet.run_fronts(cores[row["id"]], signs, names)
-            for _, _, _, front in generations:
-                if front:
-                    compare(worst, mm.normalise(front, ideal, spread), reference, hv_ref)
+            _, generations, _ = cmet.run_fronts(cores[row["id"]], signs, names)
+            for gen in generations:
+                if gen["front"]:
+                    compare(worst, mm.normalise(gen["front"], ideal, spread),
+                            reference, hv_ref)
         print(f"  checked {key}")
     return worst.report("archive generations")
 

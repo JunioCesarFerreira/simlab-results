@@ -45,7 +45,8 @@ data/                      what the viewer reads
                            HV / GD / IGD
   groups.json              the comparable groups: reference front, ideal and
                            nadir, and every run's indicators
-  exp/<id>/core.json       generations, objectives, Pareto front,
+  exp/<id>/core.json       generations (with their survivor sets, where the
+                           run recorded them), objectives, Pareto front,
                            per-simulation network metrics
   exp/<id>/chromosomes.json  relay coordinates, for the topology view
   exp/<id>/metrics.json    hypervolume, GD and IGD per generation
@@ -111,13 +112,21 @@ comparisons between these runs rather than distances to a known optimum.
 
 ### Which set is measured
 
-Each generation is measured on the non-dominated subset of its **offspring**
-(`Q_t`) — the individuals that generation evaluated. The live GUI can also
-measure the survivor set `P_t`, what environmental selection carried forward,
-but survivors were persisted for only 6 of these 51 runs, so the archive shows
-the one series it can show for all of them. Offspring is the noisier reading:
-it swings with each batch and can drop while the search still holds a better
-parent.
+Each generation is measured on the non-dominated subset of the **survivor set**
+`P_t` — the population environmental selection kept, which is what the search
+carries forward, and what the live GUI plots. Most survivors were evaluated in
+an *earlier* generation (4 663 of 5 050 in the longest run), so they are stored
+as chromosome hashes on the generation and resolved against every individual
+the run ever evaluated.
+
+Only **6 of the 51 runs recorded survivors**; the other 45 predate the field
+and fall back to their offspring `Q_t`, the individuals evaluated in that
+generation. The viewer labels which set it is showing, and `metrics.json`
+carries `population_source` (`survivors`, `offspring`, or `mixed`) plus a
+`source` on every generation. The difference is not cosmetic — on one
+problem1 run the survivor hypervolume rises over 11 generations and falls back
+in 2 steps, while the offspring reading of the same run falls in 7 of 10 and
+ends below where it started.
 
 A generation in which nothing was feasible encloses no volume, so its HV is 0
 and the curve stays continuous; its distances are left empty and drawn as a gap,
@@ -216,9 +225,12 @@ Objective values are an **array** on `individuals` (in the order given by
 `experiment.pareto_front`. Both forms appear in the same file.
 
 Infeasible individuals are scored with a large penalty value (~1.01e9) in every
-objective, negated for objectives being maximised. Summary statistics over raw
-objective values should be robust to it — the viewer plots medians for this
-reason.
+objective, negated for objectives being maximised. It is a marker, not a
+measurement: any statistic taken over raw objective values has to exclude it
+first. A median is not enough on its own — 277 of this archive's 550
+individuals in `P1-NSGA3-10g` are infeasible, so the median *is* the penalty —
+so the viewer drops every value at or beyond 1e8 before plotting or measuring
+anything, and says how many it dropped.
 
 ## Rebuilding
 

@@ -128,6 +128,13 @@ def build_core(bundle: dict) -> dict:
         for s in bundle.get("simulations", [])
     ]
 
+    # ``survivors`` is the population environmental selection kept (P_t), as
+    # chromosome hashes. It is what the search actually carried forward, and it
+    # is the set the indicators are measured on. The hashes are kept rather
+    # than the objectives because most survivors were evaluated in an EARLIER
+    # generation — 4 663 of 5 050 in the longest run — so the set cannot be
+    # reconstructed from the generation's own individuals. Only 6 of the 51
+    # runs recorded it; the rest predate the field.
     generations = [
         {
             "id": str(g.get("_id")),
@@ -135,6 +142,7 @@ def build_core(bundle: dict) -> dict:
             "status": g.get("status"),
             "start_time": g.get("start_time"),
             "end_time": g.get("end_time"),
+            **({"survivors": list(g["survivors"])} if g.get("survivors") else {}),
         }
         for g in bundle.get("generations", [])
     ]

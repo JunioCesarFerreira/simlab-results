@@ -83,6 +83,8 @@ td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
         font-size: 12px; border: 1px solid var(--border); background: var(--panel); }
 .pill.s-done { background: var(--accent-soft); border-color: transparent; color: var(--accent); }
 .pill.s-cancelled, .pill.s-error, .pill.s-failed { color: var(--warn); }
+/* A measured set that is not the one asked for. */
+.pill.s-fallback { color: var(--warn); border-color: var(--warn); }
 
 .grid { display: grid; gap: 14px; grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); }
 .card { background: var(--panel); border: 1px solid var(--border);
