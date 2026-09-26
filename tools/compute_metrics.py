@@ -1,11 +1,25 @@
 #!/usr/bin/env python3
 """
 Precomputes the quality indicators the viewer shows: hypervolume, generational
-distance and inverted generational distance, per generation and per run.
+distance, inverted generational distance and its Pareto-compliant variant
+IGD+, per generation and per run.
 
 They are computed here, once, rather than in the browser: IGD against a
 reference front is O(|R| x |A|) per generation, and the archive has 1 153
-generations. The viewer only plots numbers.
+generations.
+
+The definitions follow the platform's own ``pylib/moo_metrics.py`` — the p = 1
+mean for GD and IGD, the d+ of Ishibuchi et al. (2015) for IGD+, normalisation
+by the reference front's ideal-nadir range — so a number here and the same
+number in the live GUI mean the same thing. ``tools/check_parity.py`` holds that
+claim to moocore, the library the platform computes with.
+
+Each generation is measured on the non-dominated subset of its **offspring**
+(Q_t): the individuals that generation evaluated, which is what every
+generation document records. The survivor set P_t, which the live GUI prefers,
+was persisted for only 6 of the 51 archived runs.
+
+The viewer only plots numbers.
 
 Input is the built ``data/`` directory; output goes back into it:
 
@@ -52,6 +66,7 @@ from moo_metrics import (  # noqa: E402
     generational_distance,
     hypervolume,
     inverted_generational_distance,
+    inverted_generational_distance_plus,
     nondominated,
     normalise,
     thin_front,
@@ -150,14 +165,24 @@ def run_fronts(core, signs, names):
     return final, generations
 
 
-def indicators(front, ideal, spread, reference, ref_point):
+def indicators(front, ideal, spread, reference, ref_point, empty_hv=None):
+    """The four indicators for one front.
+
+    A generation in which nothing was feasible dominates no volume, so its
+    hypervolume is 0 and the curve stays continuous; the distances are left
+    null, which the chart draws as a gap rather than as the perfect convergence
+    a zero would imply. ``empty_hv`` is None for a whole run, where "no front at
+    all" is not the same statement as "a front worth zero".
+    """
     if not front:
-        return {"hv": None, "gd": None, "igd": None, "front_size": 0}
+        return {"hv": empty_hv, "gd": None, "igd": None, "igd_plus": None,
+                "front_size": 0}
     scaled = normalise(front, ideal, spread)
     return {
         "hv": rnd(hypervolume(scaled, ref_point)),
         "gd": rnd(generational_distance(scaled, reference)),
         "igd": rnd(inverted_generational_distance(scaled, reference)),
+        "igd_plus": rnd(inverted_generational_distance_plus(scaled, reference)),
         "front_size": len(front),
     }
 
@@ -214,7 +239,8 @@ def build_metrics(root: Path) -> int:
                     "index": gen_index,
                     "feasible": feasible,
                     "infeasible": infeasible,
-                    **indicators(front, ideal, spread, reference, ref_point),
+                    **indicators(front, ideal, spread, reference, ref_point,
+                                 empty_hv=0.0),
                 }
                 for gen_index, feasible, infeasible, front in generations
             ]
@@ -225,6 +251,11 @@ def build_metrics(root: Path) -> int:
                 "objectives": objectives,
                 "hv_reference_point": HV_REF,
                 "reference_front_size": len(reference),
+                # Every generation document records the individuals evaluated in
+                # it — the offspring, Q_t. The survivor set P_t was persisted for
+                # only 6 of the 51 runs, so that is the one series the whole
+                # archive can show. Same meaning as the live GUI's "Offspring".
+                "population": "offspring",
                 "final": {**summary,
                           "source": "pareto_front" if core["pareto"] else "last_generation"},
                 "generations": per_gen,
@@ -243,8 +274,9 @@ def build_metrics(root: Path) -> int:
                 "generations": row["counts"]["generations"],
                 **summary,
             })
-            print(f"    {row['name'][:44]:<44} hv={summary['hv']}"
-                  f" gd={summary['gd']} igd={summary['igd']}")
+            print(f"    {row['name'][:40]:<40} hv={summary['hv']}"
+                  f" gd={summary['gd']} igd={summary['igd']}"
+                  f" igd+={summary['igd_plus']}")
 
         groups_out.append({
             "key": key,

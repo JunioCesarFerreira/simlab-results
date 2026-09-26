@@ -104,6 +104,17 @@ dl.kv dt { color: var(--muted); }
 dl.kv dd { margin: 0; font-variant-numeric: tabular-nums; }
 
 .chart { width: 100%; height: 380px; }
+
+/* The convergence panels, laid out as in the live SimLab GUI: HV, GD and IGD
+   side by side, each on its own scale. */
+.hvgd { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; }
+.hvgd-panel { height: 240px; min-width: 0; }
+.measured { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-bottom: 10px; }
+.measured-label { font-size: 11px; font-weight: 600; letter-spacing: .04em;
+                  text-transform: uppercase; color: var(--muted); }
+@media (max-width: 860px) {
+  .hvgd { grid-template-columns: 1fr; }
+}
 .chartbar { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-bottom: 8px; }
 .chartbar label { font-size: 13px; color: var(--muted); }
 .chartbar select {

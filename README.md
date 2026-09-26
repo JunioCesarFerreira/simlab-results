@@ -64,7 +64,9 @@ tools/export_reference.py  captures reference/ straight from MongoDB
 tools/build_gridfs_dataset.py  distils the Cooja simulation output (§ below)
 tools/zenodo_upload.py     deposits that dataset on Zenodo
 tools/compute_metrics.py   computes the quality indicators into data/
-tools/moo_metrics.py       hypervolume, GD, IGD — standard library only
+tools/moo_metrics.py       hypervolume, GD, IGD, IGD+ — standard library only
+tools/check_parity.py      holds those four to moocore, the library the
+                           platform itself computes with (dev check)
 ```
 
 `data/` is derived from `raw/` and rounded to the precision the charts use
@@ -74,7 +76,7 @@ gzip round-trip against a SHA-256 of the source before writing it.
 
 ## Quality indicators
 
-Every run is scored with the three usual multi-objective indicators, and the
+Every run is scored with the four usual multi-objective indicators, and the
 viewer plots them per generation and ranks the runs against each other:
 
 | | |
@@ -82,10 +84,44 @@ viewer plots them per generation and ranks the runs against each other:
 | **HV** — hypervolume | volume of objective space dominated by the front. **Higher is better**: it rewards converging *and* spreading out. |
 | **GD** — generational distance | mean distance from each point of the front to the nearest reference point. **Lower is better**: pure convergence, blind to coverage. |
 | **IGD** — inverted generational distance | mean distance from each *reference* point to the nearest point of the front. **Lower is better**: convergence and coverage together. |
+| **IGD+** | the Pareto-compliant variant (Ishibuchi et al., 2015), which counts only the objectives where a solution is *worse* than the reference point. Plain IGD is not even weakly Pareto compliant — a front that dominates another can score worse — so the two are read side by side, IGD+ bounding IGD from below. |
 
 They are computed once by `tools/compute_metrics.py` and stored, not computed
 in the browser: IGD is `O(|reference| × |front|)` per generation, over 1 153
 generations.
+
+The **definitions** are the platform's own, from its `pylib/moo_metrics.py`:
+the `p = 1` mean for GD and IGD, `d+` for IGD+, normalisation by the reference
+front's ideal-nadir range. `tools/check_parity.py` holds the pure-Python
+implementations here to moocore, the library the platform computes with: they
+agree to ~1e-16 on all 1 149 non-empty generations in the archive and on 400
+random fronts. The viewer also plots them in the GUI's layout — HV | GD | IGD
+with IGD+, one panel each — and its colours.
+
+The **reference** is not the same, so the values here will not reproduce the
+live GUI's for the same run. The GUI measures a WSN run against its own final
+Pareto front, and takes its hypervolume in raw objective units against a worst
+point derived from that run alone; both are per-run choices, which makes the
+numbers self-referential and not comparable between runs. The archive measures
+every run in a group against one shared reference front and one shared scale,
+because comparing the runs is what an archive of 51 of them is for. For the
+synthetic benchmarks the GUI does better still: it uses the analytical true
+front, which the archive does not, so DTLZ2 and SCH1 numbers here are also
+comparisons between these runs rather than distances to a known optimum.
+
+### Which set is measured
+
+Each generation is measured on the non-dominated subset of its **offspring**
+(`Q_t`) — the individuals that generation evaluated. The live GUI can also
+measure the survivor set `P_t`, what environmental selection carried forward,
+but survivors were persisted for only 6 of these 51 runs, so the archive shows
+the one series it can show for all of them. Offspring is the noisier reading:
+it swings with each batch and can drop while the search still holds a better
+parent.
+
+A generation in which nothing was feasible encloses no volume, so its HV is 0
+and the curve stays continuous; its distances are left empty and drawn as a gap,
+rather than as a zero that would read as perfect convergence.
 
 **Runs are only compared within a group** — same problem, same objectives, same
 directions. The archive has five: `problem0` with 2 objectives (SCH1),
@@ -113,11 +149,11 @@ at the nadir of one objective still earns volume for being extreme in another.
 in every objective (negated where maximised), which is not a point in objective
 space; `metrics.json` reports how many were dropped per generation.
 
-Per generation, the indicators are measured on the non-dominated set of *that
-generation's own population* — not on the best found so far — so the curves can
-dip when a generation explores. The per-run figure is measured on the recorded
-Pareto front, or on the last generation for the three cancelled runs that never
-recorded one.
+The curves are per generation, not best-so-far, so they can dip when a
+generation explores. The per-run figure is measured on the recorded Pareto
+front, or on the last generation for the three cancelled runs that never
+recorded one — all three of which were cancelled before finding a single
+feasible individual.
 
 ### What is *not* in the archive
 
@@ -195,6 +231,9 @@ python tools/build_archive.py --input ../simlab/experiments_export
 
 # or recompute only the indicators, over the data/ already in the repository
 python tools/compute_metrics.py
+
+# optional, needs numpy + moocore: check them against the platform's library
+../simlab/.venv/bin/python tools/check_parity.py
 ```
 
 ## Citation

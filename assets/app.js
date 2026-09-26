@@ -72,7 +72,9 @@
     return getComputedStyle(document.documentElement).getPropertyValue(name).trim();
   }
 
-  function makeChart(el, option) {
+  /** ``styleAxes`` false leaves the option's own axis styling alone — for the
+      charts that copy the live GUI's look rather than this page's. */
+  function makeChart(el, option, styleAxes = true) {
     const chart = echarts.init(el, null, { renderer: "canvas" });
     const ink = css("--ink"), muted = css("--muted"), border = css("--border");
     chart.setOption({
@@ -90,7 +92,7 @@
     // xAxis/yAxis may be a single axis or one per panel; merging an object
     // onto an array would only ever style the first.
     const spread = (axis) => (Array.isArray(axis) ? axis.map(() => axisStyle) : axisStyle);
-    if (option.xAxis) {
+    if (styleAxes && option.xAxis) {
       chart.setOption({ xAxis: spread(option.xAxis), yAxis: spread(option.yAxis) });
     }
     charts.push(chart);
@@ -98,6 +100,35 @@
   }
 
   const PALETTE = ["#3f7fb0", "#c9772f", "#2f6f4f", "#8a5fa8", "#b04f6a", "#5f8f3f"];
+
+  /** Follows the CSS: an explicit data-theme wins, otherwise the OS setting. */
+  function isDark() {
+    const forced = document.documentElement.getAttribute("data-theme");
+    if (forced) return forced === "dark";
+    return !!(window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches);
+  }
+
+  /** The indicator charts copy the live SimLab GUI's palette
+      (gui/simlab/src/services/chartTheme.ts) so the same curve looks the same
+      in both places. GD and IGD get distinct hues rather than shades of one:
+      they answer different questions and are read side by side. */
+  function metricPalette() {
+    const dark = isDark();
+    return {
+      text: dark ? "#cdd6f4" : "#334155",
+      muted: dark ? "#6c7086" : "#94a3b8",
+      grid: dark ? "#313244" : "#e2e8f0",
+      tooltip: dark ? "#1e1e2e" : "#ffffff",
+      tooltipBorder: dark ? "#313244" : "#e2e8f0",
+      hv: dark ? "#89b4fa" : "#2563eb",
+      gd: dark ? "#f38ba8" : "#dc2626",
+      igd: dark ? "#cba6f7" : "#7c3aed",
+      igdPlus: dark ? "#f9e2af" : "#b45309",
+      hvArea: dark ? "rgba(137,180,250,0.12)" : "rgba(37,99,235,0.08)",
+      gdArea: dark ? "rgba(243,139,168,0.12)" : "rgba(220,38,38,0.08)",
+      igdArea: dark ? "rgba(203,166,247,0.12)" : "rgba(124,58,237,0.08)",
+    };
+  }
 
   /** Axis labels: 5,436,228 is nine characters of noise on a tick. */
   function compactNum(v) {
@@ -614,11 +645,15 @@
 
   // ---------------------------------------------------- quality indicators
 
+  // Same four indicators, same hues, as the live GUI's convergence panels.
   const IND = {
-    hv: { label: "Hypervolume", better: "higher", colour: PALETTE[2] },
-    gd: { label: "Generational distance", better: "lower", colour: PALETTE[0] },
-    igd: { label: "Inverted generational distance", better: "lower", colour: PALETTE[1] },
+    hv: { label: "Hypervolume", better: "higher", hue: "hv" },
+    gd: { label: "Generational distance", better: "lower", hue: "gd" },
+    igd: { label: "Inverted generational distance", better: "lower", hue: "igd" },
+    igd_plus: { label: "IGD+ (Pareto-compliant)", better: "lower", hue: "igdPlus" },
   };
+
+  const indColour = (key) => metricPalette()[IND[key].hue];
 
   /** Where this run places among the comparable runs, 1 = best. */
   function rankIn(group, id, key) {
@@ -675,46 +710,122 @@
     drawGroupBars(group, id);
   }
 
-  /** The three indicators over the generations of one run. */
+  /** The three indicators over the generations of one run, laid out as in the
+      live SimLab GUI: one panel each, HV | GD | IGD, so a near-zero GD next to
+      a large IGD stays readable instead of collapsing onto one axis. */
   function drawConvergence(metrics) {
     const wrap = document.getElementById("ind-conv");
-    const gens = metrics.generations.filter((g) => g.hv !== null);
+    const gens = metrics.generations;
     if (gens.length < 2) {
       wrap.innerHTML = `<p class="note">Too few generations to chart a convergence curve.</p>`;
       return;
     }
-    wrap.innerHTML = `<div id="conv" class="chart" style="height:300px"></div>
-      <p class="note">Measured on the non-dominated set of each generation's own
-        population, not on the best found so far — so these curves can dip when a
-        generation explores.</p>`;
+    // Three empty panels say less than one sentence does.
+    if (gens.every((g) => g.front_size === 0)) {
+      const evaluated = gens.reduce((n, g) => n + g.feasible + g.infeasible, 0);
+      wrap.innerHTML = `<p class="note">Nothing to measure: not one of the
+        ${evaluated.toLocaleString()} individuals this run evaluated was feasible —
+        every one of them was scored with the infeasibility penalty.</p>`;
+      return;
+    }
 
-    // Hypervolume runs to ~1 and the distances to ~0.1; on one axis the distances
-    // would be a flat line along the floor.
-    makeChart(document.getElementById("conv"), {
-      tooltip: { trigger: "axis", valueFormatter: (v) => fmtInd(v) },
-      legend: { top: 0, textStyle: { color: css("--muted") } },
-      grid: { left: 58, right: 58, top: 34, bottom: 46, containLabel: true },
-      xAxis: {
-        type: "category", data: gens.map((g) => g.index),
-        name: "generation", nameLocation: "middle", nameGap: 26,
+    wrap.innerHTML = `
+      <div class="measured">
+        <span class="measured-label">Measured set</span>
+        <span class="pill s-done">Offspring (Q<sub>t</sub>)</span>
+        <span class="note" style="margin:0">the individuals each generation
+          evaluated — it swings with every batch, and can drop while the search
+          still holds a better parent</span>
+      </div>
+      <div class="hvgd">
+        <div id="c-hv" class="hvgd-panel" role="img"
+             aria-label="Hypervolume per generation, measured on the offspring"></div>
+        <div id="c-gd" class="hvgd-panel" role="img"
+             aria-label="Generational distance per generation"></div>
+        <div id="c-igd" class="hvgd-panel" role="img"
+             aria-label="Inverted generational distance per generation"></div>
+      </div>
+      <p class="note">Each generation is measured on the non-dominated subset of
+        its own offspring, not on the best found so far, so these curves can dip
+        when a generation explores. The live GUI can measure the survivor set
+        P<sub>t</sub> instead; the archive cannot, because survivors were
+        persisted for only 6 of its 51 runs. A generation with no feasible
+        individual encloses no volume — HV 0 — and its distances are left as a
+        gap rather than a zero that would read as perfect convergence.</p>`;
+
+    const c = metricPalette();
+    const labels = gens.map((g) => `Gen ${g.index}`);
+
+    const base = (name, digits) => ({
+      animation: false,
+      tooltip: {
+        trigger: "axis",
+        backgroundColor: c.tooltip, borderColor: c.tooltipBorder,
+        textStyle: { color: c.text, fontSize: 12 },
+        formatter: (params) => {
+          const rows = params.map((p) => {
+            const v = p.value;
+            const shown = v === null || v === undefined ? "—"
+              : digits === null ? Number(v).toExponential(3) : Number(v).toFixed(digits);
+            return `<b>${esc(p.seriesName)}</b>: ${shown}`;
+          }).join("<br>");
+          return `${esc(params[0].name)}<br>${rows}`;
+        },
       },
-      yAxis: [
-        { type: "value", scale: true, name: "HV", nameTextStyle: { color: css("--muted") } },
-        { type: "value", scale: true, name: "distance", position: "right",
-          nameTextStyle: { color: css("--muted") }, splitLine: { show: false } },
-      ],
-      series: [
-        { name: "HV", type: "line", yAxisIndex: 0, showSymbol: false,
-          data: gens.map((g) => g.hv),
-          lineStyle: { width: 2.2, color: IND.hv.colour }, itemStyle: { color: IND.hv.colour } },
-        { name: "GD", type: "line", yAxisIndex: 1, showSymbol: false,
-          data: gens.map((g) => g.gd),
-          lineStyle: { width: 1.6, color: IND.gd.colour }, itemStyle: { color: IND.gd.colour } },
-        { name: "IGD", type: "line", yAxisIndex: 1, showSymbol: false,
-          data: gens.map((g) => g.igd),
-          lineStyle: { width: 1.6, color: IND.igd.colour }, itemStyle: { color: IND.igd.colour } },
-      ],
+      grid: { top: 34, right: 18, bottom: 34, left: 52, containLabel: true },
+      xAxis: {
+        type: "category", data: labels,
+        axisLine: { lineStyle: { color: c.grid } },
+        axisTick: { lineStyle: { color: c.grid } },
+        axisLabel: { color: c.muted, fontSize: 11 },
+      },
+      yAxis: {
+        type: "value", name, scale: true,
+        nameTextStyle: { color: c.muted, fontSize: 11 },
+        axisLine: { show: false },
+        axisLabel: { color: c.muted, fontSize: 10, formatter: compactNum },
+        splitLine: { lineStyle: { color: c.grid, type: "dashed" } },
+      },
     });
+
+    const line = (name, data, colour, area) => ({
+      name, type: "line", data,
+      smooth: true, symbol: "circle", symbolSize: 6, showSymbol: false,
+      // A null is a break in the line, not a point on the floor.
+      connectNulls: false,
+      itemStyle: { color: colour },
+      lineStyle: { color: colour, width: 2 },
+      ...(area ? { areaStyle: { color: area } } : {}),
+    });
+
+    makeChart(document.getElementById("c-hv"), {
+      ...base("HV", 4),
+      series: [line("Hypervolume", gens.map((g) => g.hv), c.hv, c.hvArea)],
+    }, false);
+
+    makeChart(document.getElementById("c-gd"), {
+      ...base("GD", 4),
+      series: [line("GD", gens.map((g) => g.gd), c.gd, c.gdArea)],
+    }, false);
+
+    // IGD and IGD+ answer the same question on the same scale, so they share a
+    // panel. IGD+ bounds IGD from below, so it is a dashed line with no area —
+    // a second fill would only muddy the first.
+    makeChart(document.getElementById("c-igd"), {
+      ...base("IGD", 4),
+      legend: {
+        top: 2, right: 2, itemWidth: 14, itemHeight: 8,
+        textStyle: { color: c.muted, fontSize: 10 }, data: ["IGD", "IGD+"],
+      },
+      series: [
+        line("IGD", gens.map((g) => g.igd), c.igd, c.igdArea),
+        {
+          ...line("IGD+", gens.map((g) => g.igd_plus), c.igdPlus, null),
+          symbol: "triangle",
+          lineStyle: { color: c.igdPlus, width: 2, type: "dashed" },
+        },
+      ],
+    }, false);
   }
 
   /** This run against every comparable run, one indicator at a time. */
@@ -760,7 +871,7 @@
         series: [{
           type: "bar", data: runs.map((r) => r[key]), barMaxWidth: 14,
           itemStyle: {
-            color: (p) => (runs[p.dataIndex].id === id ? IND[key].colour : css("--border")),
+            color: (p) => (runs[p.dataIndex].id === id ? indColour(key) : css("--border")),
           },
           label: {
             show: true, position: "right", color: css("--muted"), fontSize: 11,
@@ -947,13 +1058,15 @@
       <div class="tablewrap"><table>
         <thead><tr><th>Run</th><th>Strategy</th><th>Status</th>
           <th class="num">Gens</th><th class="num">Front</th>
-          <th class="num">HV</th><th class="num">GD</th><th class="num">IGD</th></tr></thead>
+          <th class="num">HV</th><th class="num">GD</th><th class="num">IGD</th>
+          <th class="num" title="Pareto-compliant IGD (Ishibuchi et al., 2015)">IGD+</th></tr></thead>
         <tbody>${group.runs.map((r) => `<tr>
           <td><a class="rowlink" href="#/exp/${encodeURIComponent(r.id)}">${esc(r.name || r.id)}</a></td>
           <td>${esc(r.strategy || "—")}</td><td>${statusPill(r.status)}</td>
           <td class="num">${r.generations}</td><td class="num">${r.front_size}</td>
           <td class="num">${fmtInd(r.hv)}</td><td class="num">${fmtInd(r.gd)}</td>
-          <td class="num">${fmtInd(r.igd)}</td></tr>`).join("")}</tbody>
+          <td class="num">${fmtInd(r.igd)}</td>
+          <td class="num">${fmtInd(r.igd_plus)}</td></tr>`).join("")}</tbody>
       </table></div>
     `);
 
@@ -973,7 +1086,7 @@
                  axisLabel: { color: css("--muted"), width: 220, overflow: "truncate" } },
         series: [{
           type: "bar", data: runs.map((r) => r[k]), barMaxWidth: 14,
-          itemStyle: { color: IND[k].colour, opacity: 0.85 },
+          itemStyle: { color: indColour(k), opacity: 0.85 },
           label: { show: true, position: "right", color: css("--muted"), fontSize: 11,
                    formatter: (p) => fmtInd(p.value) },
         }],

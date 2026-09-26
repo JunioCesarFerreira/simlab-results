@@ -17,7 +17,8 @@ from math import sqrt
 
 __all__ = [
     "nondominated", "hypervolume", "generational_distance",
-    "inverted_generational_distance", "thin_front", "normalise",
+    "inverted_generational_distance", "inverted_generational_distance_plus",
+    "thin_front", "normalise",
 ]
 
 
@@ -102,6 +103,37 @@ def inverted_generational_distance(front, reference):
     if not front or not reference:
         return None
     return sum(_min_distance(r, front) for r in reference) / len(reference)
+
+
+def _min_distance_plus(r, front):
+    """Nearest solution to reference point ``r`` under the ``d+`` of Ishibuchi
+    et al. (2015): only the objectives where the solution is *worse* than ``r``
+    count towards the distance."""
+    best = float("inf")
+    for a in front:
+        d = 0.0
+        for x, y in zip(a, r):
+            gap = x - y
+            if gap > 0:
+                d += gap * gap
+                if d >= best:
+                    break
+        else:
+            best = d
+    return sqrt(best)
+
+
+def inverted_generational_distance_plus(front, reference):
+    """IGD+ — the Pareto-compliant variant of IGD (Ishibuchi et al., 2015).
+
+    Plain IGD is not even weakly Pareto compliant: a front that dominates
+    another can score worse. IGD+ bounds it from below and does not have that
+    defect, which is why the platform reports the two side by side rather than
+    replacing one with the other.
+    """
+    if not front or not reference:
+        return None
+    return sum(_min_distance_plus(r, front) for r in reference) / len(reference)
 
 
 def normalise(points, ideal, spread):
